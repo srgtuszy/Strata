@@ -1,0 +1,42 @@
+{
+ "hardware": "AMD Radeon AI PRO R9700 (gfx1201, 32,624 MiB VRAM); Ryzen 7 7700 (8c/16t, AVX-512); 64 GiB DDR5-6000 EXPO; PCIe Gen5 x16",
+ "software": "Ubuntu 24.04.4, kernel 7.0.0-34-generic, system ROCm 7.2.4, Strata c499bd102e7a4135c0de389dcfe38c399759ccc8, engine 0.1.32 (local-hip)",
+ "model": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF @ ed59f92082b1e93c0e96d60a8b11aab089b52f09, IQ3_S original",
+ "settings": "context 32768, kv int8, expert-cache auto (13302 slots, 25.26 GiB), prefill auto (8192), spec 4 / spec-min-p 0.5, MTP, 7 pool workers, reasoning on, temperature 0, max 256 tokens",
+ "protocol": "distinct wikitext-2-raw wiki.test.raw windows + 'Summarize the passage above in one sentence.'; engine log confirms 0 reused tokens on every run",
+ "runs": {
+  "wmma_off": {
+   "4K": [
+    {"prompt_tokens": 3158, "prefill_tok_s": 835.1, "decode_tok_s": 63.6, "generated": 229, "draft_accepted": "138/189"},
+    {"prompt_tokens": 3229, "prefill_tok_s": 1073.4, "decode_tok_s": 71.0, "generated": 176, "draft_accepted": "102/139"},
+    {"prompt_tokens": 3258, "prefill_tok_s": 1152.0, "decode_tok_s": 64.1, "generated": 256, "draft_accepted": "134/191"}
+   ],
+   "16K": [
+    {"prompt_tokens": 12767, "prefill_tok_s": 1312.6, "decode_tok_s": 75.1, "generated": 191, "draft_accepted": "120/150"},
+    {"prompt_tokens": 12636, "prefill_tok_s": 1327.1, "decode_tok_s": 69.4, "generated": 202, "draft_accepted": "119/171"},
+    {"prompt_tokens": 13478, "prefill_tok_s": 1388.7, "decode_tok_s": 66.2, "generated": 202, "draft_accepted": "112/168"}
+   ]
+  },
+  "wmma_on": {
+   "4K": [
+    {"prompt_tokens": 3158, "prefill_tok_s": 840.1, "decode_tok_s": 74.1, "generated": 236, "draft_accepted": "144/191"},
+    {"prompt_tokens": 3229, "prefill_tok_s": 832.7, "decode_tok_s": 72.8, "generated": 256, "draft_accepted": "152/211"},
+    {"prompt_tokens": 3258, "prefill_tok_s": 872.2, "decode_tok_s": 65.5, "generated": 256, "draft_accepted": "131/191"}
+   ],
+   "16K": [
+    {"prompt_tokens": 12767, "prefill_tok_s": 1247.9, "decode_tok_s": 81.7, "generated": 192, "draft_accepted": "125/148"},
+    {"prompt_tokens": 12636, "prefill_tok_s": 1246.9, "decode_tok_s": 75.7, "generated": 239, "draft_accepted": "150/208"},
+    {"prompt_tokens": 13478, "prefill_tok_s": 1326.4, "decode_tok_s": 63.9, "generated": 225, "draft_accepted": "116/173"}
+   ]
+  }
+ },
+ "medians": {
+  "wmma_off": {"4K": {"prefill": 1073, "decode": 64.1}, "16K": {"prefill": 1327, "decode": 69.4}},
+  "wmma_on":  {"4K": {"prefill": 840,  "decode": 72.8}, "16K": {"prefill": 1247, "decode": 75.7}}
+ },
+ "notes": [
+  "decode variance is dominated by MTP draft acceptance (61-81%); WMMA only affects the prompt path.",
+  "STRATA_PREFILL_RING=96 with WMMA gave 948 tok/s at 4K (single run) - worse on the R9700 than the default ring.",
+  "expert cache decode hit rate was 97-98% on every run."
+ ]
+}
