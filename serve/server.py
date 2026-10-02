@@ -1870,6 +1870,10 @@ def make_handler(svc: Service):
             if not self._authorized():
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
+            # llama.cpp's own clients post the bare /chat/completions (its OpenAI alias); map it onto the /v1 one
+            # so a llama-server client (pi-llama-cpp, ...) talks to Strata unchanged.
+            if path == "/chat/completions":
+                path = "/v1/chat/completions"
             if path == "/settings":
                 self._settings()
                 return
