@@ -1114,7 +1114,9 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
                  "-DSTRATA_PREFILL_MMQ=ON", "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
                  f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
-                 f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",
+                 f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}"
+                + (f" --gcc-install-dir={os.environ['STRATA_HIP_GCC_DIR']}"
+                   if os.environ.get("STRATA_HIP_GCC_DIR") else ""),
                  f"-DSTRATA_GGML_DIR={llama}"], None, "")
     shutil.copy2(ROOT / "build-hip" / EXE, eng / EXE)
     meta = {"source": "local-hip", "backend": "hip", "version": source_version(), "archs": archs, "vision": "none",
