@@ -8,6 +8,7 @@
 
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/kv_stream.hpp"
 #include "strata/kernels/qsa.hpp"
 
 #include <cuda_runtime.h>
@@ -323,6 +324,87 @@ int main() {
         }
     }
     std::printf("  -> Max reconstruction error after 4-bit quant + dequant: %.4f (OK)\n", worst_quant_err);
+
+    // -------------------------------------------------------------
+    // Test 5: Streamed gather - a non-resident page (KV streaming, kv_stream.hpp) is gathered from the host
+    // copy's identity row (kv_append_q4_step's layout); the old kernel computed a negative row and read out of
+    // bounds before the pool instead.
+    // -------------------------------------------------------------
+    std::printf("[5/5] Verifying the Q4_0 gather's non-resident page fallback...\n");
+    {
+        std::vector<uint8_t> cpy_k(pool_bytes, 0), cpy_v(pool_bytes, 0);
+        for (int n = 0; n < n_fill; ++n) {
+            const int pos = positions[n];
+            for (int h = 0; h < H; ++h) {
+                const long long pr = ((long long) table[pos / P] * H + h) * P + pos % P;
+                const long long ir = ((long long) (pos / P) * H + h) * P + pos % P;
+                std::memcpy(cpy_k.data() + ir * bytes_per_head, h_k_q4.data() + pr * bytes_per_head, bytes_per_head);
+                std::memcpy(cpy_v.data() + ir * bytes_per_head, h_v_q4.data() + pr * bytes_per_head, bytes_per_head);
+            }
+        }
+        uint8_t* d_hk = dalloc<uint8_t>(pool_bytes);
+        uint8_t* d_hv = dalloc<uint8_t>(pool_bytes);
+        ck(cudaMemcpy(d_hk, cpy_k.data(), pool_bytes, cudaMemcpyHostToDevice), "memcpy host k");
+        ck(cudaMemcpy(d_hv, cpy_v.data(), pool_bytes, cudaMemcpyHostToDevice), "memcpy host v");
+        k::KvHostPools host{};
+        host.k_q4 = d_hk;
+        host.v_q4 = d_hv;
+        std::vector<int> per_page(pages, 0);
+        for (int n = 0; n < n_fill; ++n) ++per_page[positions[n] / P];
+        int bad_page = -1;
+        for (int p = 0; p < pages; ++p)
+            if (per_page[p] >= 4) { bad_page = p; break; }
+        std::vector<int32_t> table2 = table;
+        table2[bad_page] = -1;
+        int32_t* d_table2 = dalloc<int32_t>(pages);
+        ck(cudaMemcpy(d_table2, table2.data(), pages * sizeof(int32_t), cudaMemcpyHostToDevice), "memcpy table2");
+        std::vector<int32_t> ids2;
+        for (int n = 0; n < n_fill && ids2.size() < 6; ++n)
+            if (positions[n] / P == bad_page) ids2.push_back(positions[n]);
+        for (int n = 0; n < n_fill && ids2.size() < 12; ++n)
+            if (positions[n] / P != bad_page) ids2.push_back(positions[n]);
+        std::sort(ids2.begin(), ids2.end());
+        ck(cudaMemcpy(d_ids, ids2.data(), ids2.size() * sizeof(int32_t), cudaMemcpyHostToDevice), "memcpy ids2");
+        int32_t hstep2[k::kStepCount] = {0, 0, 0, (int) ids2.size()};
+        ck(cudaMemcpy(d_step, hstep2, sizeof(hstep2), cudaMemcpyHostToDevice), "memcpy step2");
+
+        k::kv_gather_q4_step(d_k_q4, d_v_q4, d_table2, d_ids, d_step, max_ids, s, d_k_scratch, d_v_scratch,
+                             nullptr, &host);
+        ck(cudaDeviceSynchronize(), "streamed kv_gather_q4_step");
+
+        std::vector<uint16_t> sk((size_t) ids2.size() * H * D), sv(sk.size());
+        ck(cudaMemcpy(sk.data(), d_k_scratch, sk.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost), "d2h sk");
+        ck(cudaMemcpy(sv.data(), d_v_scratch, sv.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost), "d2h sv");
+
+        long bad_vals = 0;
+        for (int j = 0; j < (int) ids2.size(); ++j)
+            for (int h = 0; h < H; ++h) {
+                const long long ir = ((long long) (ids2[j] / P) * H + h) * P + ids2[j] % P;
+                for (int b = 0; b < blocks_per_head; ++b) {
+                    const k::block_q4_0* kb = reinterpret_cast<const k::block_q4_0*>(cpy_k.data() + ir * bytes_per_head) + b;
+                    const k::block_q4_0* vb = reinterpret_cast<const k::block_q4_0*>(cpy_v.data() + ir * bytes_per_head) + b;
+                    for (int t = 0; t < 32; ++t) {
+                        const int jt = t < 16 ? t : t - 16;
+                        const int kq_ = (t < 16) ? ((kb->qs[jt] & 0x0F) - 8) : ((kb->qs[jt] >> 4) - 8);
+                        const int vq_ = (t < 16) ? ((vb->qs[jt] & 0x0F) - 8) : ((vb->qs[jt] >> 4) - 8);
+                        const size_t o = ((size_t) j * H + h) * D + b * 32 + t;
+                        if (sk[o] != k::f16_from_f32((float) kq_ * k::f32_from_f16(kb->d))) ++bad_vals;
+                        if (sv[o] != k::f16_from_f32((float) vq_ * k::f32_from_f16(vb->d))) ++bad_vals;
+                    }
+                }
+            }
+        if (bad_vals > 0) {
+            std::fprintf(stderr, "FAIL: %ld streamed-gather values differ from the host copy\n", bad_vals);
+            ++g_fail;
+        } else {
+            const int n_miss = (int) std::count_if(ids2.begin(), ids2.end(), [&](int c) { return c / P == bad_page; });
+            std::printf("  -> %d non-resident + %d resident cells gathered through page -1 from the host copy (OK)\n",
+                        n_miss, (int) ids2.size() - n_miss);
+        }
+        cudaFree(d_hk);
+        cudaFree(d_hv);
+        cudaFree(d_table2);
+    }
 
     cudaFree(d_src);
     cudaFree(d_dst);

@@ -347,10 +347,12 @@ void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, 
 void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, const int32_t* step,
                    int32_t* ids, void* stream);
 
-/// `max_ids` must be the CAPACITY of `k_scratch`/`v_scratch` in ids.
+/// `max_ids` must be the CAPACITY of `k_scratch`/`v_scratch` in ids.  `host` (KV streaming): a block the streaming
+/// left non-resident (page -1/-2) is gathered from the host copy's identity row, as `kv_append_step` writes it.
+struct KvHostPools;
 void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_t* page_table,
                     const int32_t* ids, const int32_t* step, int64_t max_ids, const QsaShapes& s,
-                    uint16_t* k_scratch, uint16_t* v_scratch, void* stream);
+                    uint16_t* k_scratch, uint16_t* v_scratch, void* stream, const KvHostPools* host = nullptr);
 
 /// `max_ids` must be at least the largest selection the geometry can produce, because it sizes the SHARED
 /// memory the softmax works in.

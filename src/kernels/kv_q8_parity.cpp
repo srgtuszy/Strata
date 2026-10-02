@@ -133,6 +133,96 @@ int main() {
                 }
             }
     }
+    // 4. the streamed gather: a non-resident page (page -1, as KV streaming leaves it, kv_stream.hpp) is gathered
+    //    from the HOST copy's identity row (kv_append's layout); the old kernel computed a negative row and read
+    //    out of bounds before the pool instead
+    {
+        std::vector<int8_t> cpy_kq((size_t) cells * H * D, 0), cpy_vq(cpy_kq.size(), 0);
+        std::vector<uint16_t> cpy_ks((size_t) cells * H * G, 0), cpy_vs(cpy_ks.size(), 0);
+        std::vector<uint16_t> pool_k((size_t) cells * H * D), pool_v(pool_k.size());
+        ck(cudaMemcpy(pool_k.data(), kp, pool_k.size() * 2, cudaMemcpyDeviceToHost), "d2h f16 k pool");
+        ck(cudaMemcpy(pool_v.data(), vp, pool_v.size() * 2, cudaMemcpyDeviceToHost), "d2h f16 v pool");
+        std::vector<uint16_t> cpy_kp((size_t) cells * H * D, 0), cpy_vp(cpy_kp.size(), 0);
+        for (int n = 0; n < n_fill; ++n) {
+            const int pos = positions[n];
+            for (int h = 0; h < H; ++h) {
+                const long long pr = ((long long) table[pos / P] * H + h) * P + pos % P;
+                const long long ir = ((long long) (pos / P) * H + h) * P + pos % P;
+                for (int g = 0; g < G; ++g) { cpy_ks[ir * G + g] = hks[pr * G + g]; cpy_vs[ir * G + g] = hvs[pr * G + g]; }
+                for (int d = 0; d < D; ++d) {
+                    cpy_kq[ir * D + d] = hkq[pr * D + d];
+                    cpy_vq[ir * D + d] = hvq[pr * D + d];
+                    cpy_kp[ir * D + d] = pool_k[pr * D + d];
+                    cpy_vp[ir * D + d] = pool_v[pr * D + d];
+                }
+            }
+        }
+        int8_t* d_cpy_kq = dalloc<int8_t>(cpy_kq.size());
+        int8_t* d_cpy_vq = dalloc<int8_t>(cpy_vq.size());
+        uint16_t* d_cpy_ks = dalloc<uint16_t>(cpy_ks.size());
+        uint16_t* d_cpy_vs = dalloc<uint16_t>(cpy_vs.size());
+        uint16_t* d_cpy_kp = dalloc<uint16_t>(cpy_kp.size());
+        uint16_t* d_cpy_vp = dalloc<uint16_t>(cpy_vp.size());
+        ck(cudaMemcpy(d_cpy_kq, cpy_kq.data(), cpy_kq.size(), cudaMemcpyHostToDevice), "h2d cpy kq");
+        ck(cudaMemcpy(d_cpy_vq, cpy_vq.data(), cpy_vq.size(), cudaMemcpyHostToDevice), "h2d cpy vq");
+        ck(cudaMemcpy(d_cpy_ks, cpy_ks.data(), cpy_ks.size() * 2, cudaMemcpyHostToDevice), "h2d cpy ks");
+        ck(cudaMemcpy(d_cpy_vs, cpy_vs.data(), cpy_vs.size() * 2, cudaMemcpyHostToDevice), "h2d cpy vs");
+        ck(cudaMemcpy(d_cpy_kp, cpy_kp.data(), cpy_kp.size() * 2, cudaMemcpyHostToDevice), "h2d cpy kp");
+        ck(cudaMemcpy(d_cpy_vp, cpy_vp.data(), cpy_vp.size() * 2, cudaMemcpyHostToDevice), "h2d cpy vp");
+        k::KvHostPools host_q8{}, host_f16{};
+        host_q8.k_q = d_cpy_kq; host_q8.v_q = d_cpy_vq; host_q8.k_scale = d_cpy_ks; host_q8.v_scale = d_cpy_vs;
+        host_f16.k_pool = d_cpy_kp; host_f16.v_pool = d_cpy_vp;
+        // a page with several filled cells becomes non-resident; the selection takes its cells and resident ones
+        std::vector<int> per_page(pages, 0);
+        for (int n = 0; n < n_fill; ++n) ++per_page[positions[n] / P];
+        int bad_page = -1;
+        for (int p = 0; p < pages; ++p)
+            if (per_page[p] >= 4) { bad_page = p; break; }
+        std::vector<int32_t> table2 = table;
+        table2[bad_page] = -1;
+        int32_t* d_table2 = dalloc<int32_t>(pages);
+        ck(cudaMemcpy(d_table2, table2.data(), pages * 4, cudaMemcpyHostToDevice), "table2");
+        std::vector<int32_t> ids2;
+        for (int n = 0; n < n_fill && ids2.size() < 6; ++n)
+            if (positions[n] / P == bad_page) ids2.push_back(positions[n]);
+        for (int n = 0; n < n_fill && ids2.size() < 12; ++n)
+            if (positions[n] / P != bad_page) ids2.push_back(positions[n]);
+        std::sort(ids2.begin(), ids2.end());
+        const int n2 = (int) ids2.size();
+        ck(cudaMemcpy(d_ids, ids2.data(), n2 * 4, cudaMemcpyHostToDevice), "ids2");
+        int32_t hstep2[k::kStepCount] = {0, 0, 0, n2};
+        ck(cudaMemcpy(step, hstep2, sizeof hstep2, cudaMemcpyHostToDevice), "step2");
+        k::kv_gather_q8_step(kq, vq, ks, vs, d_table2, d_ids, step, max_ids, s, k8, v8, nullptr, &host_q8);
+        k::kv_gather_step(kp, vp, d_table2, d_ids, step, max_ids, s, k16, v16, nullptr, &host_f16);
+        ck(cudaDeviceSynchronize(), "streamed gather");
+        std::vector<uint16_t> a8((size_t) n2 * H * D), b8(a8.size()), a16(a8.size()), b16(a8.size());
+        ck(cudaMemcpy(a8.data(), k8, a8.size() * 2, cudaMemcpyDeviceToHost), "d2h");
+        ck(cudaMemcpy(b8.data(), v8, b8.size() * 2, cudaMemcpyDeviceToHost), "d2h");
+        ck(cudaMemcpy(a16.data(), k16, a16.size() * 2, cudaMemcpyDeviceToHost), "d2h");
+        ck(cudaMemcpy(b16.data(), v16, b16.size() * 2, cudaMemcpyDeviceToHost), "d2h");
+        long bad = 0;
+        for (int j = 0; j < n2; ++j)
+            for (int h = 0; h < H; ++h) {
+                const long long ir = ((long long) (ids2[j] / P) * H + h) * P + ids2[j] % P;
+                for (int d = 0; d < D; ++d) {
+                    const size_t o = ((size_t) j * H + h) * D + d;
+                    for (int kvsel = 0; kvsel < 2; ++kvsel) {
+                        const float sf = k::f32_from_f16((kvsel ? cpy_vs : cpy_ks)[ir * G + d / 64]);
+                        const int8_t q = (kvsel ? cpy_vq : cpy_kq)[ir * D + d];
+                        const uint16_t want = k::f16_from_f32((float) q * sf);
+                        if ((kvsel ? b8 : a8)[o] != want) ++bad;
+                        if ((kvsel ? b16 : a16)[o] != (kvsel ? cpy_vp : cpy_kp)[ir * D + d]) ++bad;
+                    }
+                }
+            }
+        if (bad) { std::fprintf(stderr, "FAIL: %ld streamed-gather values differ from the host copy\n", bad); ++g_fail; }
+        else {
+            const int n_miss = (int) std::count_if(ids2.begin(), ids2.end(), [&](int c) { return c / P == bad_page; });
+            std::printf("streamed gather: %d non-resident + %d resident cells, int8 and fp16 (OK)\n", n_miss, n2 - n_miss);
+        }
+        cudaFree(d_cpy_kq); cudaFree(d_cpy_vq); cudaFree(d_cpy_ks); cudaFree(d_cpy_vs);
+        cudaFree(d_cpy_kp); cudaFree(d_cpy_vp); cudaFree(d_table2);
+    }
     // |x - q*sf| <= sf/2 (the stored scale keeps |x|/sf <= 127.06, so no clamping), plus the fp16 rounding of each
     // side: at most 2^-11 relative of a value up to 127*sf, i.e. 127/2048 = 0.062 steps each -> 0.5 + 0.124
     if (!(worst <= 0.5 + 2.0 * 127.0 / 2048.0 + 1e-3)) { std::fprintf(stderr, "FAIL: INT8 vs FP16 error %.3f steps\n", worst); ++g_fail; }

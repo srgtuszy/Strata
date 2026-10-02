@@ -952,13 +952,19 @@ int64_t max_blocks = (st.max_cells / s.idx_block) + 2;
         strata::kernels::qsa_decode_attn_step(b.qcur, pools, b.ids, st.step, cap, s, b.attn_scratch, b.attn, stream);
     } else {
     if (st.kv_hybrid) {
+        // K through the int8 gather, V through the q4 one, both aliased as the caller has always done; the host
+        // fallbacks are aliased the same way (a non-resident block gathers from the host copy, kv_stream.hpp)
+        const strata::kernels::KvHostPools k_host{nullptr, nullptr, st.host.k_q, st.host.k_q,
+                                                  st.host.k_scale, st.host.k_scale, nullptr, nullptr};
         kv_gather_q8_step(st.k_q, st.k_q, st.k_scale, st.k_scale, st.page_table, b.ids, st.step, cap, s,
-                          b.k_scratch, b.k_scratch, stream);
+                          b.k_scratch, b.k_scratch, stream, &k_host);
+        const strata::kernels::KvHostPools v_host{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                                  st.host.v_q4, st.host.v_q4};
         strata::kernels::kv_gather_q4_step(st.v_q4, st.v_q4, st.page_table, b.ids, st.step, cap, s,
-                                           b.v_scratch, b.v_scratch, stream);
+                                           b.v_scratch, b.v_scratch, stream, &v_host);
     }
-    else if (st.kv_q4) strata::kernels::kv_gather_q4_step(st.k_q4, st.v_q4, st.page_table, b.ids, st.step, cap, s, b.k_scratch, b.v_scratch, stream);
-    else if (st.kv_int8) kv_gather_q8_step(st.k_q, st.v_q, st.k_scale, st.v_scale, st.page_table, b.ids, st.step, cap, s,                                 b.k_scratch, b.v_scratch, stream);    else kv_gather_step(st.k_pool, st.v_pool, st.page_table, b.ids, st.step, cap, s, b.k_scratch, b.v_scratch,                   stream);    if (native_flash_attn_short) {
+    else if (st.kv_q4) strata::kernels::kv_gather_q4_step(st.k_q4, st.v_q4, st.page_table, b.ids, st.step, cap, s, b.k_scratch, b.v_scratch, stream, &st.host);
+    else if (st.kv_int8) kv_gather_q8_step(st.k_q, st.v_q, st.k_scale, st.v_scale, st.page_table, b.ids, st.step, cap, s,                                 b.k_scratch, b.v_scratch, stream, &st.host);    else kv_gather_step(st.k_pool, st.v_pool, st.page_table, b.ids, st.step, cap, s, b.k_scratch, b.v_scratch,                   stream, &st.host);    if (native_flash_attn_short) {
     if (st.max_cells < 1 || st.max_cells > 256 || !st.attention_status || !st.host_step) {
         err = v.name("native_flash_attn") + ": short adapter requires context <=256 and persistent status storage";
         return false;

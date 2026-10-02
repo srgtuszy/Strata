@@ -405,8 +405,9 @@ __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __r
 
 __global__ void kv_gather_kernel(const uint16_t* __restrict__ k_pool, const uint16_t* __restrict__ v_pool,
                                  const int32_t* __restrict__ table, const int32_t* __restrict__ ids,
-                                const int32_t* __restrict__ step, int kv_heads, int head_dim, int page_size,
-                                uint16_t* __restrict__ k_scratch, uint16_t* __restrict__ v_scratch) {
+                                 const int32_t* __restrict__ step, int kv_heads, int head_dim, int page_size,
+                                 uint16_t* __restrict__ k_scratch, uint16_t* __restrict__ v_scratch,
+                                 KvHostPools host) {
     const long long n_ids = (long long) __ldg(step + kStepWidth);
     const int per = head_dim / 4;                       // 4 halfs per uint2
     const long long total = n_ids * kv_heads * per;
@@ -417,10 +418,22 @@ __global__ void kv_gather_kernel(const uint16_t* __restrict__ k_pool, const uint
     const int h = rem / per, q = rem - h * per;
     const int cell = ids[id];
     const long long page = (long long) table[cell / page_size];
-    const long long src = ((page * kv_heads + h) * page_size + (cell % page_size)) * (long long) per + q;
+    // KV streaming: a block the streaming left non-resident keeps page -1 (or -2, claimed); the gather then reads
+    // the HOST copy's identity row, exactly the row kv_append_step writes there. Without this the row below was
+    // negative and the loads read out of bounds before the pool.
+    const uint16_t* ksrc = k_pool;
+    const uint16_t* vsrc = v_pool;
+    long long page_row = page;
+    if (page < 0) {
+        if (host.k_pool == nullptr) return;   // no host copy: the table of a non-streaming state has no -1
+        ksrc = host.k_pool;
+        vsrc = host.v_pool;
+        page_row = cell / page_size;
+    }
+    const long long src = ((page_row * kv_heads + h) * page_size + (cell % page_size)) * (long long) per + q;
     const long long dst = (id * kv_heads + h) * (long long) per + q;
-    reinterpret_cast<uint2*>(k_scratch)[dst] = reinterpret_cast<const uint2*>(k_pool)[src];
-    reinterpret_cast<uint2*>(v_scratch)[dst] = reinterpret_cast<const uint2*>(v_pool)[src];
+    reinterpret_cast<uint2*>(k_scratch)[dst] = reinterpret_cast<const uint2*>(ksrc)[src];
+    reinterpret_cast<uint2*>(v_scratch)[dst] = reinterpret_cast<const uint2*>(vsrc)[src];
 }
 
 // ================= 6. qsa_attend =================
@@ -640,7 +653,7 @@ void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, co
 
 void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_t* page_table,
                     const int32_t* ids, const int32_t* step, int64_t max_ids, const QsaShapes& s,
-                    uint16_t* k_scratch, uint16_t* v_scratch, void* stream) {
+                    uint16_t* k_scratch, uint16_t* v_scratch, void* stream, const KvHostPools* host) {
     validate(s, "kv_gather");
     if (step == nullptr) fail("kv_gather: step is null");
     if (max_ids <= 0) return;
@@ -649,7 +662,7 @@ void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_
     const long long total = max_ids * s.n_head_kv * (s.head_dim / 4);
     kv_gather_kernel<<<grid_for(total, 256), 256, 0, (cudaStream_t) stream>>>(
         k_pool, v_pool, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
-        k_scratch, v_scratch);
+        k_scratch, v_scratch, host ? *host : KvHostPools{});
     check_launch("kv_gather");
     if (stream == nullptr) check_sync("kv_gather");
 }

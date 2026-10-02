@@ -33,9 +33,11 @@ void kv_append_q8_step(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_
                        const KvHostPools* host = nullptr);
 
 /// Gather step[kStepWidth] cells named by `ids` into FP16 scratch `[id][kv_head][head_dim]`; the grid is sized by
-/// `max_ids` (capacity), the kernel reads the real count from `step`.
+/// `max_ids` (capacity), the kernel reads the real count from `step`.  `host` (KV streaming): a non-resident
+/// block (page -1/-2) is gathered from the host copy's identity row, as `kv_append_q8_step` writes it.
 void kv_gather_q8_step(const int8_t* k_q, const int8_t* v_q, const uint16_t* k_scale, const uint16_t* v_scale,
                        const int32_t* page_table, const int32_t* ids, const int32_t* step, int64_t max_ids,
-                       const QsaShapes& s, uint16_t* k_scratch, uint16_t* v_scratch, void* stream);
+                       const QsaShapes& s, uint16_t* k_scratch, uint16_t* v_scratch, void* stream,
+                       const KvHostPools* host = nullptr);
 
 }  // namespace strata::kernels

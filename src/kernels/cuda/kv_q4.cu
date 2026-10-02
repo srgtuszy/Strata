@@ -139,7 +139,8 @@ __global__ void kv_append_q4_batch_kernel(uint8_t* __restrict__ k_q4, uint8_t* _
 __global__ void kv_gather_q4_kernel(const uint8_t* __restrict__ k_q4, const uint8_t* __restrict__ v_q4,
                                     const int32_t* __restrict__ table, const int32_t* __restrict__ ids,
                                     const int32_t* __restrict__ step, int kv_heads, int head_dim, int page_size,
-                                    uint16_t* __restrict__ k_scratch, uint16_t* __restrict__ v_scratch) {
+                                    uint16_t* __restrict__ k_scratch, uint16_t* __restrict__ v_scratch,
+                                    KvHostPools host) {
     const long long n_ids = (long long) __ldg(step + kStepWidth);
     const int blocks_per_head = head_dim / QK4_0;                        // 8
     const int bytes_per_head = blocks_per_head * sizeof(block_q4_0);    // 144
@@ -156,10 +157,21 @@ __global__ void kv_gather_q4_kernel(const uint8_t* __restrict__ k_q4, const uint
 
     const int cell = ids[id];
     const long long page = (long long) table[cell / page_size];
-    const long long row = (page * kv_heads + h) * page_size + (cell % page_size);
+    // KV streaming: a non-resident block (page -1/-2) is gathered from the host copy's identity row, as
+    // kv_append_q4_step writes it; the row this kernel computed from a negative page read out of bounds.
+    const uint8_t* kq4_src = k_q4;
+    const uint8_t* vq4_src = v_q4;
+    long long page_row = page;
+    if (page < 0) {
+        if (host.k_q4 == nullptr || host.v_q4 == nullptr) return;   // no host copy: a non-streaming table has no -1
+        kq4_src = host.k_q4;
+        vq4_src = host.v_q4;
+        page_row = cell / page_size;
+    }
+    const long long row = (page_row * kv_heads + h) * page_size + (cell % page_size);
 
-    const block_q4_0* k_blk = reinterpret_cast<const block_q4_0*>(k_q4 + row * bytes_per_head) + b;
-    const block_q4_0* v_blk = reinterpret_cast<const block_q4_0*>(v_q4 + row * bytes_per_head) + b;
+    const block_q4_0* k_blk = reinterpret_cast<const block_q4_0*>(kq4_src + row * bytes_per_head) + b;
+    const block_q4_0* v_blk = reinterpret_cast<const block_q4_0*>(vq4_src + row * bytes_per_head) + b;
     const float kd = f32_from_f16(k_blk->d);
     const float vd = f32_from_f16(v_blk->d);
     const int j = t < 16 ? t : (t - 16);
@@ -216,7 +228,7 @@ void kv_append_q4(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, int64
 
 void kv_gather_q4_step(const uint8_t* k_q4, const uint8_t* v_q4, const int32_t* page_table, const int32_t* ids,
                        const int32_t* step, int64_t max_ids, const QsaShapes& s, uint16_t* k_scratch,
-                       uint16_t* v_scratch, void* stream) {
+                       uint16_t* v_scratch, void* stream, const KvHostPools* host) {
     if (max_ids <= 0) return;
     const int blocks_per_head = (int) (s.head_dim / QK4_0);
     const int64_t total_blocks = max_ids * s.n_head_kv * blocks_per_head;
@@ -224,7 +236,7 @@ void kv_gather_q4_step(const uint8_t* k_q4, const uint8_t* v_q4, const int32_t* 
     const unsigned num_blocks = (unsigned) ((total_blocks + rows_per_block - 1) / rows_per_block);
     kv_gather_q4_kernel<<<dim3(num_blocks), dim3(32, rows_per_block), 0, (cudaStream_t) stream>>>(
         k_q4, v_q4, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size, k_scratch,
-        v_scratch);
+        v_scratch, host ? *host : KvHostPools{});
     check("kv_gather_q4 launch");
 }
 

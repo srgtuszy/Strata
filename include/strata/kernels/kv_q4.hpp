@@ -54,8 +54,10 @@ void kv_append_q4(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, int64
                   const KvHostPools* stage = nullptr);
 
 /// Gather step[kStepWidth] cells named by `ids` into FP16 scratch [id][kv_head][head_dim] (still rotated).
+/// `host` (KV streaming): a non-resident block (page -1/-2) is gathered from the host copy's identity row,
+/// as `kv_append_q4_step` writes it.
 void kv_gather_q4_step(const uint8_t* k_q4, const uint8_t* v_q4, const int32_t* page_table, const int32_t* ids,
                        const int32_t* step, int64_t max_ids, const QsaShapes& s, uint16_t* k_scratch,
-                       uint16_t* v_scratch, void* stream);
+                       uint16_t* v_scratch, void* stream, const KvHostPools* host = nullptr);
 
 }  // namespace strata::kernels
