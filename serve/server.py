@@ -775,9 +775,14 @@ class Service:
 
     def reasoning_budget(self, req) -> int | None:
         """#123: the most tokens this request may think, or None: the request's `reasoning_budget_tokens`, else the
-        config's.  0 (or less) means no budget, so a request can turn a configured one off.  ValueError (a 400) for
+        config's.  llama.cpp's clients (pi-llama-cpp) send the same knob as `thinking_budget_tokens`; accept that as
+        an alias.  0 (or less) means no budget, so a request can turn a configured one off.  ValueError (a 400) for
         anything that is not a whole number."""
-        value = (req or {}).get("reasoning_budget_tokens") if isinstance(req, dict) else None
+        value = None
+        if isinstance(req, dict):
+            value = req.get("reasoning_budget_tokens")
+            if value is None:
+                value = req.get("thinking_budget_tokens")
         if value is None:
             value = self.reasoning_budget_tokens
         if isinstance(value, float) and value.is_integer():
