@@ -13256,6 +13256,7 @@ int main(int argc, char** argv) {
         std::vector<int32_t> live;
         std::vector<ImgKey> live_imgs, req_imgs;
         bool live_ok = false;
+        std::string live_session;
         // #879: a window met non-finite logits: the next request drops every cached state first and reads from token 0
         bool nan_flush = false;
         // #3465: the non-finite logits came in a window that reads the PROMPT's tail (the last few tokens, read through
@@ -13616,6 +13617,7 @@ int main(int argc, char** argv) {
             const strata::core::QsaState* draft_last;     ///< ... with the last stage's image (a split: the drafter's GPU)
             bool with_reuse;                              ///< the retained K/V describes this source (the main session's)
             std::string what;                             ///< the log's words after the token count ("", " from slot 1")
+            std::string session = "";                     ///< opt-in client session tag (`strata_session`)
         };
         // Save only on a switch/rewind, not on each continuing request. No graph
         // addresses change: all parked images live in ordinary host vectors.
@@ -13901,6 +13903,7 @@ int main(int argc, char** argv) {
                                  (long long) o.conversation_cache_min_free_mib, ram_note(mem_after).c_str());
                     return true;
                 }
+                image.session = src.session;
                 const size_t snapshot_bytes = image.bytes();
                 const bool stored = conversations.put(std::move(image), held);
                 std::fprintf(stderr, "strata serve: conversation cache: %s %zu tokens%s in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu\n",
@@ -13926,7 +13929,7 @@ int main(int argc, char** argv) {
             const size_t n_st = stages.size();
             ParkSource src{live, live_imgs, checks, cvec_cached, ss, {},
                            (n_st > 0 && !mtp_first) || !use_mtp ? nullptr : &mtp.kv_state(),
-                           use_mtp && !mtp_first && n_st > 0 ? &mtp.kv_state() : nullptr, true, ""};
+                           use_mtp && !mtp_first && n_st > 0 ? &mtp.kv_state() : nullptr, true, "", live_session};
             for (auto& st : stages) src.stage_sessions.push_back(&st->ss);
             return park_source(src, held);
         };
@@ -18040,6 +18043,8 @@ int main(int argc, char** argv) {
             // slot_read=1 (BGEN): the server takes DONE and BADM without a token, so the turn may be read in its slot
             // (STRATA_SLOT_READ, below).  Absent = the admission's first token on the main sessions, as before.
             bool req_slot_read = false;
+            std::string req_session;
+            bool req_supersedes = false;
             if (endp != nullptr) {   // GENI takes the same keys (#75: image requests were always greedy); its
                                      // embedding file path is the first token without an =
                 for (;;) {
@@ -18056,6 +18061,8 @@ int main(int argc, char** argv) {
                     else if (key == "pen_from") req_pen_from = std::atoll(tok.c_str() + eq + 1);
                     else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
                     else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
+                    else if (key == "sess") req_session = tok.substr(eq + 1);
+                    else if (key == "supersedes") req_supersedes = std::atoi(tok.c_str() + eq + 1) != 0;
                     else if (key == "prefill") req_prefill_only = std::atoi(tok.c_str() + eq + 1) != 0;
                     else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
                     else if (key == "hold") {
@@ -18894,10 +18901,18 @@ int main(int argc, char** argv) {
                 slot_source < 0 && lent_slot < 0 && req_imgs.empty() &&
                 strata::program::conv_cache::rewind_keep(live.data(), (int64_t) live.size(), ids.data(), resume,
                                                          o.conversation_cache_rewind_keep);
+            if (req_supersedes && !req_session.empty()) {
+                if (const size_t dropped = conversations.drop_session(req_session, want_cvec))
+                    std::fprintf(stderr, "strata serve: conversation cache: dropped %zu superseded session cop%s; parked=%zu\n",
+                                 dropped, dropped == 1 ? "y" : "ies", conversations.size());
+            }
+            const bool session_supersedes =
+                req_supersedes && !req_session.empty() && !from_live && resume > 0 && live_ok &&
+                live_session == req_session && !incoming && !borrow && slot_source < 0 && lent_slot < 0;
             // (a batch slot that holds this conversation does not make the park unneeded: with the park skipped on two cards
             // - #5864's STRATA_SLOT_PARK_SKIP - the turn after it read the slot's K/V instead of the parked image and one
             // token differed from the park as before)
-            const bool keep_branch = pin_sibling || rewind_skip;
+            const bool keep_branch = pin_sibling || rewind_skip || session_supersedes;
             if (rewind_skip)
                 std::fprintf(stderr,
                              "strata serve: conversation cache: park not needed (the rewind keeps %lld of %lld tokens "
@@ -22468,6 +22483,7 @@ int main(int argc, char** argv) {
                 live_imgs = imgs_below(req_imgs, (int64_t) live.size());
                 live_ok = o.prompt_cache > 0 && req_ckpt;   // ckpt=0: nothing to continue or park (#830)
                 if (nf_hit) live_ok = false;   // #879 (the next request's start drops the rest)
+                live_session = live_ok ? req_session : std::string();
             } else if (!nf_hit && pp_exact && pp_reached > 0 && o.prompt_cache > 0 && req_ckpt &&
                        pp_reached <= (int64_t) cur.size()) {
                 // #1620: stopped between two windows (or before the first token was read): the session is exactly at
@@ -22476,6 +22492,7 @@ int main(int argc, char** argv) {
                 live.assign(cur.begin(), cur.begin() + pp_reached);
                 live_imgs = imgs_below(req_imgs, pp_reached);
                 live_ok = true;
+                live_session = req_session;
                 std::fprintf(stderr, "strata serve: cancelled request keeps its conversation: %lld tokens live\n",
                              (long long) pp_reached);
             }

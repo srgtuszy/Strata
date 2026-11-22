@@ -868,6 +868,48 @@ int main() {
             }
             check(refused > 0 && evicted_any > 0 && pool.shrinks > 0, "the workload refused, evicted and trimmed the pool at least once");
         }
+        {
+            // Opt-in session supersession on context compaction: when a client compacts [1, 2, 10, 11, 12] -> [1, 2, 99, 100],
+            // drop_superseded keeps the pre-compaction branch (its deepest checkpoint [1, 2, 10, 11] is no longer held), while
+            // drop_session("ses_a", true) reclaims only "ses_a" and leaves other sessions, untagged, guarded and pinned entries.
+            auto make_ckpt = [](std::initializer_list<int32_t> ids, bool pinned = false) {
+                ConversationCheckpoint c;
+                c.ids = ids;
+                c.pinned = pinned;
+                return c;
+            };
+            ConversationCache cache(64000, 8);
+            auto pre = image({1, 2, 10, 11, 12});
+            pre.session = "ses_a";
+            pre.checkpoints.push_back(make_ckpt({1, 2}));
+            pre.checkpoints.push_back(make_ckpt({1, 2, 10, 11}));
+            auto other = image({1, 2, 20, 21});
+            other.session = "ses_b";
+            other.checkpoints.push_back(make_ckpt({1, 2}));
+            other.checkpoints.push_back(make_ckpt({1, 2, 20}));
+            auto untagged = image({1, 2, 30, 31});
+            untagged.checkpoints.push_back(make_ckpt({1, 2}));
+            untagged.checkpoints.push_back(make_ckpt({1, 2, 30}));
+            auto pinned_entry = image({1, 2, 40, 41});
+            pinned_entry.session = "ses_a";
+            pinned_entry.checkpoints.push_back(make_ckpt({1, 2}, true));
+            pinned_entry.checkpoints.push_back(make_ckpt({1, 2, 40}));
+            check(cache.put(std::move(pre)) && cache.put(std::move(other)) &&
+                  cache.put(std::move(untagged)) && cache.put(std::move(pinned_entry)),
+                  "four parked entries stored");
+            std::vector<ConversationCheckpoint> compacted_cks{make_ckpt({1, 2})};
+            check(cache.drop_superseded({1, 2, 99, 100}, {}, compacted_cks, true) == 0,
+                  "drop_superseded does not match a pre-compaction branch whose deepest checkpoint diverged");
+            check(cache.drop_session("", true) == 0 && cache.size() == 4, "empty session tag is a no-op");
+            check(cache.drop_session("ses_a", false) == 0 && cache.size() == 4, "mismatched cvec stays");
+            const auto m = cache.best(std::vector<int32_t>{1, 2, 10, 11, 12, 13}, {}, true);
+            check(m.tokens == 5, "pre-compaction ses_a entry matched before guard check");
+            cache.guard(m.serial);
+            check(cache.drop_session("ses_a", true) == 0 && cache.size() == 4, "guarded entry and pinned entry both stay");
+            cache.unguard();
+            check(cache.drop_session("ses_a", true) == 1 && cache.size() == 3 && cache.superseded() == 1,
+                  "drop_session drops the unpinned ses_a pre-compaction snapshot and keeps ses_b, untagged and pinned");
+        }
     }
     std::printf("conversation_cache_test: %d checks passed\n", checks);
 }

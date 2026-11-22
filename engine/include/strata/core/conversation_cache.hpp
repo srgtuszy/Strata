@@ -11,6 +11,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -198,6 +199,7 @@ struct SavedConversation {
     std::vector<ConversationCheckpoint> checkpoints;
     std::vector<ConversationKv> kv; // main layers followed by the draft layer
     bool cvec = true;
+    std::string session; // opt-in client session tag (`strata_session`), empty when absent
     // with a layer split, the later stages' own images, one per stage, in stage order
     std::vector<SavedConversation> stage_images;
     // STRATA_PARK_ASYNC: set while a background copy fills this image's K/V; its deleter waits for that copy, and as
@@ -508,6 +510,27 @@ public:
             for (const auto& c : e.checkpoints)
                 if (!deepest || c.ids.size() > deepest->ids.size()) deepest = &c;
             if (e.cvec == cvec && deepest && !deepest->ids.empty() && held(*deepest) &&
+                !(guarded_ != 0 && serials_[i] == guarded_)) {
+                bytes_ -= e.bytes();
+                erase(i);
+                ++dropped;
+                continue;
+            }
+            ++i;
+        }
+        superseded_ += dropped;
+        return dropped;
+    }
+
+    // Drop parked entries that carry the same opt-in `session` tag (`strata_session` + `strata_supersedes`), such as a
+    // pre-compaction branch whose prefix diverged right after the system prompt and therefore is not matched by
+    // drop_superseded's deepest-checkpoint rule.  Empty `session` is a no-op; pinned and guarded entries stay.
+    size_t drop_session(const std::string& session, bool cvec) {
+        if (session.empty()) return 0;
+        size_t dropped = 0;
+        for (size_t i = 0; i < entries_.size();) {
+            const auto& e = entries_[i];
+            if (!e.pinned() && e.cvec == cvec && e.session == session &&
                 !(guarded_ != 0 && serials_[i] == guarded_)) {
                 bytes_ -= e.bytes();
                 erase(i);

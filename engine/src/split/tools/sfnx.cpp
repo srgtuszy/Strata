@@ -282,8 +282,9 @@ GenReq parse_gen(const std::string& line, int vocab, int pad, bool batch, bool i
             if (!said) std::fprintf(stderr, "sfnx: pin= (a client's strata_prefix) is not supported: such requests go on without it\n");
             said = true;
         }
-        // Strata's per-request engine tuning (strata_tune) and its control vector: nothing in sFNX to set
-        else if (k == "pcie_frac" || k == "spec_min_p" || k == "pipe" || k == "aux_cpus" || k == "cvec") {
+        // Strata's per-request engine tuning (strata_tune), session tag and its control vector: nothing in sFNX to set
+        else if (k == "pcie_frac" || k == "spec_min_p" || k == "pipe" || k == "aux_cpus" || k == "cvec" ||
+                 k == "sess" || k == "supersedes") {
             static std::set<std::string> said;
             if (said.insert(k).second)
                 std::fprintf(stderr, "sfnx: %s= (Strata's per-request engine tuning or control vector) has nothing to set in sfnx: "
