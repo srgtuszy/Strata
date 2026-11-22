@@ -62,6 +62,13 @@ def compact_at(t: Target) -> int:
     return max(COMPACT_AT, int(t.input_limit * COMPACT_AT / tested_limit))
 
 
+def pi_keep_recent(t: Target) -> int:
+    """How many recent tokens pi keeps un-summarised across a compaction: the tested 4,000 up to the tested 32K window,
+    then the same share of the input limit up to pi's own 20,000 default (17,714 at 128K)."""
+    tested_limit = TESTED_CONTEXT - OUTPUT_CAP
+    return min(20000, max(4000, int(t.input_limit * 4000 / tested_limit)))
+
+
 @dataclass
 class FileSpec:
     path: str                          # may start with ~
@@ -159,8 +166,9 @@ def omp_config(t: Target) -> str:
 
 def pi_models(t: Target) -> str:
     return _j({"providers": {"strata": {"baseUrl": t.base, "api": "openai-completions", "apiKey": t.key,
-                                        "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
+                                        "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": True},
                                         "models": [{"id": t.model, "name": _display_name(t), "reasoning": True,
+                                                    "thinkingLevelMap": {"off": "none"},
                                                     "input": ["text"], "contextWindow": t.context, "maxTokens": t.output_cap,
                                                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}})
 
@@ -168,7 +176,8 @@ def pi_models(t: Target) -> str:
 def pi_settings(t: Target) -> str:
     level = "high" if _is_hy4(t) else "medium"
     return _j({"defaultProvider": "strata", "defaultModel": t.model, "defaultThinkingLevel": level,
-               "compaction": {"enabled": True, "reserveTokens": max(1024, t.context - compact_at(t)), "keepRecentTokens": 4000}})
+               "compaction": {"enabled": True, "reserveTokens": max(1024, t.context - compact_at(t)),
+                              "keepRecentTokens": pi_keep_recent(t)}})
 
 
 def hermes_file(t: Target) -> str:
@@ -257,7 +266,7 @@ HARNESSES: list[Harness] = [
     Harness("omp", "oh-my-pi (omp)", "chat + tools", tested="omp 18.11.2",
             files=[FileSpec("~/.omp/agent/models.yml", "yaml", omp_models), FileSpec("~/.omp/agent/config.yml", "yaml", omp_config)],
             limits=_limits_omp, run='omp -p "your task"', install="curl -fsSL https://omp.sh/install | sh", aliases=("oh-my-pi",)),
-    Harness("pi", "pi (pi.dev)", "chat + tools", tested="pi 0.74.2",
+    Harness("pi", "pi (pi.dev)", "chat + tools", tested="pi 1.6.0",
             files=[FileSpec("~/.pi/agent/models.json", "json", pi_models, merge=True),
                    FileSpec("~/.pi/agent/settings.json", "json", pi_settings, merge=True)],
             env=lambda t: {"PI_SKIP_VERSION_CHECK": "1"}, limits=_limits_pi, run='pi -p "your task"',

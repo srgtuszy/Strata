@@ -48,6 +48,34 @@ class OutputCap(unittest.TestCase):
         model = next(iter(p["models"].values()))
         self.assertTrue(model["tool_call"] and model["reasoning"])
 
+    def test_pi_enables_reasoning_effort_and_scales_keep_recent_above_32k(self):
+        from serve import frontend
+
+        small_files = render("pi", 32768)["files"]
+        wide_files = render("pi", 131072)["files"]
+        huge_files = render("pi", 262144)["files"]
+        models_cfg = json.loads(wide_files[0]["text"])["providers"]["strata"]
+        self.assertIs(models_cfg["compat"]["supportsReasoningEffort"], True)
+        model_entry = models_cfg["models"][0]
+        self.assertEqual(model_entry["thinkingLevelMap"], {"off": "none"})
+        for family in (None, "hy4"):
+            frontend.use_family(family)
+            try:
+                for pi_level in ("off", "minimal", "low", "medium", "high", "xhigh"):
+                    mapped = model_entry["thinkingLevelMap"].get(pi_level, pi_level)
+                    kw = frontend.effort_kwargs(mapped)
+                    self.assertTrue("enable_thinking" in kw or "reasoning_effort" in kw, (family, pi_level, kw))
+            finally:
+                frontend.use_family(None)
+
+        small_compaction = json.loads(small_files[1]["text"])["compaction"]
+        wide_compaction = json.loads(wide_files[1]["text"])["compaction"]
+        huge_compaction = json.loads(huge_files[1]["text"])["compaction"]
+        self.assertEqual(small_compaction["keepRecentTokens"], 4000)
+        self.assertEqual(wide_compaction["keepRecentTokens"], 17714)
+        self.assertEqual(huge_compaction["keepRecentTokens"], 20000)
+        self.assertLess(wide_compaction["keepRecentTokens"] + wide_compaction["reserveTokens"], 131072)
+
 
 class RewriteKeepsTheirCap(unittest.TestCase):
     def write(self, old, ctx=131072):
