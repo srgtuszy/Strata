@@ -29,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import stat
@@ -712,6 +713,8 @@ def _start_once(name: str, *, wait: float = 300, shutdown_timeout: float = 30,
                 command += ["--expected-source-sha256", expected_source_sha256]
             if die_with is not None:
                 command += ["--die-with-pid", str(die_with[0]), "--die-with-token", die_with[1]]
+            else:
+                command = _linux_detached_scope_command(command)
             detach = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
                       if WINDOWS else {"start_new_session": True})
             proc = subprocess.Popen(command,
@@ -728,6 +731,45 @@ def _start_once(name: str, *, wait: float = 300, shutdown_timeout: float = 30,
     if wait == 0:
         return {"ok": True, "profile": name, "state": "starting", "plan": plan}
     return _await_start(name, wait, on_status)
+
+
+def _linux_detached_scope_command(command: list[str], *, platform: str | None = None,
+                                  cgroup_path: str = "/proc/self/cgroup", bus_socket: str | None = None,
+                                  which=shutil.which, env: dict | None = None) -> list[str]:
+    """Isolate a detached Linux runtime host from the caller's transient user scope (such as ``tmux-spawn-*.scope``).
+
+    ``start_new_session=True`` calls ``setsid(2)`` without leaving the caller's cgroup v2 scope. When the engine triggers a kernel
+    OOM kill inside ``tmux-spawn-*.scope``, systemd marks the whole scope ``oom-kill`` and SIGKILLs sibling tmux/agent processes.
+    ``systemd-run --user --scope --property=OOMPolicy=continue`` moves its own PID into a fresh transient scope under ``app.slice``
+    and ``execvp``s ``command`` in place (keeping ``Popen.pid`` and ``/proc/<pid>/cmdline`` unchanged). Anywhere outside a Linux
+    user ``.scope``, in containers, without a live ``systemd --user`` private socket, or with ``STRATA_NO_SYSTEMD_SCOPE=1``, the
+    command is returned unchanged.
+    """
+    plat = sys.platform if platform is None else platform
+    environ = os.environ if env is None else env
+    if not plat.startswith("linux") or environ.get("STRATA_NO_SYSTEMD_SCOPE"):
+        return command
+    try:
+        lines = Path(cgroup_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return command
+    if not any(line.startswith("0::/user.slice/") and line.rstrip().endswith(".scope") for line in lines):
+        return command
+    systemd_run = which("systemd-run")
+    if not systemd_run:
+        return command
+    if bus_socket is None:
+        uid_fn = getattr(os, "getuid", None)
+        if uid_fn is None:
+            return command
+        runtime_base = environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid_fn()}"
+        bus_socket = os.path.join(runtime_base, "systemd", "private")
+    try:
+        if not stat.S_ISSOCK(os.stat(bus_socket).st_mode):
+            return command
+    except OSError:
+        return command
+    return [systemd_run, "--user", "--scope", "--quiet", "--property=OOMPolicy=continue", "--", *command]
 
 
 def _await_start(name: str, wait: float, on_status=None) -> dict:

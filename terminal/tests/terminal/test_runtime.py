@@ -1589,6 +1589,48 @@ class StartWaitLimit(unittest.TestCase):
                     with self.assertRaisesRegex(pr.ProfileError, "invalid timeout"):
                         jn._validate_direct_intent(kind, dict(intent))
 
+    def test_linux_detached_scope_isolates_user_scopes_and_preserves_non_scope_launches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cg_tmux = root / "cgroup.tmux"
+            cg_tmux.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-1234.scope\n",
+                               encoding="utf-8")
+            cg_svc = root / "cgroup.service"
+            cg_svc.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/strata.service\n",
+                              encoding="utf-8")
+            cg_ctr = root / "cgroup.container"
+            cg_ctr.write_text("0::/\n", encoding="utf-8")
+            sock_path = root / "private"
+            if hasattr(socket, "AF_UNIX"):
+                srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                srv.bind(str(sock_path))
+                self.addCleanup(srv.close)
+            cmd = ["python3", "-m", "strata_control.runtime", "--host", "local"]
+            if hasattr(socket, "AF_UNIX"):
+                wrapped = runtime._linux_detached_scope_command(
+                    cmd, platform="linux", cgroup_path=str(cg_tmux), bus_socket=str(sock_path),
+                    which=lambda _: "/usr/bin/systemd-run", env={})
+                self.assertEqual(wrapped, ["/usr/bin/systemd-run", "--user", "--scope", "--quiet",
+                                           "--property=OOMPolicy=continue", "--", *cmd])
+                self.assertEqual(runtime._linux_detached_scope_command(
+                    cmd, platform="linux", cgroup_path=str(cg_svc), bus_socket=str(sock_path),
+                    which=lambda _: "/usr/bin/systemd-run", env={}), cmd)
+                self.assertEqual(runtime._linux_detached_scope_command(
+                    cmd, platform="linux", cgroup_path=str(cg_ctr), bus_socket=str(sock_path),
+                    which=lambda _: "/usr/bin/systemd-run", env={}), cmd)
+                self.assertEqual(runtime._linux_detached_scope_command(
+                    cmd, platform="linux", cgroup_path=str(cg_tmux), bus_socket=str(sock_path),
+                    which=lambda _: "/usr/bin/systemd-run", env={"STRATA_NO_SYSTEMD_SCOPE": "1"}), cmd)
+                self.assertEqual(runtime._linux_detached_scope_command(
+                    cmd, platform="linux", cgroup_path=str(cg_tmux), bus_socket=str(sock_path),
+                    which=lambda _: None, env={}), cmd)
+                self.assertEqual(runtime._linux_detached_scope_command(
+                    cmd, platform="win32", cgroup_path=str(cg_tmux), bus_socket=str(sock_path),
+                    which=lambda _: "/usr/bin/systemd-run", env={}), cmd)
+            self.assertEqual(runtime._linux_detached_scope_command(
+                cmd, platform="linux", cgroup_path=str(cg_tmux), bus_socket=str(root / "missing"),
+                which=lambda _: "/usr/bin/systemd-run", env={}), cmd)
+
 
 if __name__ == "__main__":
     unittest.main()
