@@ -1764,6 +1764,17 @@ class SamplingKeys(unittest.TestCase):
         for absent in ({}, {"strata_checkpoint": True}, {"strata_checkpoint": 0}, {"cache_prompt": False}):
             self.assertNotIn("ckpt=0", self.keys(**absent), absent)
 
+    def test_session_supersedes_keys(self):
+        self.assertIn("sess=pi_ses-01", self.keys(strata_session="pi_ses-01"))
+        self.assertNotIn("supersedes=1", self.keys(strata_session="pi_ses-01", strata_supersedes=False))
+        both = self.keys(strata_session="pi_ses-01", strata_supersedes=True)
+        self.assertIn("sess=pi_ses-01", both)
+        self.assertIn("supersedes=1", both)
+        for bad in ({}, {"strata_supersedes": True}, {"strata_session": ""}, {"strata_session": "bad space"},
+                    {"strata_session": "a=b"}, {"strata_session": "x" * 129}, {"strata_session": 123}):
+            ks = self.keys(**bad)
+            self.assertFalse([x for x in ks if x.startswith(("sess=", "supersedes="))], bad)
+
     def test_penalty_window(self):
         self.assertIn("penalty_last_n=64", self.keys(presence_penalty=1.5))
         self.assertIn("penalty_last_n=4096", self.keys(repetition_penalty=1.1, penalty_last_n=4096))

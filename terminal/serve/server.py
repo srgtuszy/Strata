@@ -1329,6 +1329,14 @@ class StrataEngine:
         # extends: no conversation checkpoint for it (#830).  It still reuses a cached prefix.  Absent = as before.
         if sampling.get("strata_checkpoint") is False:
             keys += " ckpt=0"
+        # Opt-in client session tag ("strata_session") and post-compaction supersession ("strata_supersedes": true):
+        # lets the engine skip parking or reclaim a compacted session's obsolete pre-compaction snapshot without
+        # touching other sessions.  Absent = as before.
+        sess = sampling.get("strata_session")
+        if isinstance(sess, str) and 1 <= len(sess) <= 128 and all(c.isascii() and (c.isalnum() or c in "-_.:@") for c in sess):
+            keys += f" sess={sess}"
+            if sampling.get("strata_supersedes") is True:
+                keys += " supersedes=1"
         # Hy4-Flash (serve/hy4_kind.py): its pictures are files the engine reads and encodes itself, one `image=<path>` key each, in prompt order (spaces and % in a path as %20 and %25)
         for p in sampling.get("strata_hy4_images") or []:
             keys += " image=" + hy4_kind.encode_path(p)
